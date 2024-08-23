@@ -1,30 +1,23 @@
 use core::f64;
 use std::cmp;
-use std::convert::Infallible;
 use std::env;
-use std::ops::Index;
-use image::DynamicImage;
-use image::GenericImageView;
+use std::thread::JoinHandle;
 use image::ImageBuffer;
-// use std::io::Cursor;
 use image::ImageReader;
-use image::ImageError;
-use image::Pixel;
-use image::Pixels;
 use image::Rgb;
-use image::Rgba;
 use std::io;
 use std::io::Write;
+use std::thread;
+use std::sync::{Arc, Mutex};
 
 struct BlurParams {
   data: ImageBuffer<Rgb<u8>, Vec<u8>>,
   width: u32,
   height: u32,
-  xComponent: u32,
-  yComponent: u32,
+  x_component: u32,
+  y_component: u32,
 }
 
-const BYTES_PER_PIXEL: u32 = 4;
 
 fn srgb_to_linear(value: f64) -> f64 {
   let v = value / 255.0;
@@ -36,94 +29,97 @@ fn srgb_to_linear(value: f64) -> f64 {
   }
 }
 
-struct ClampedValues {
-  width: u32,
-  height: u32,
+
+fn calc_factors(x: u32, y: u32, width: u32, height: u32, get_pixel: impl Fn(u32, u32) -> (u8,u8, u8)) -> (f64, f64, f64) {
+  let scale = 1.0 / (width as f32 * height as f32);
+  let normalisation = if x == 0 && y == 0 { 1 } else { 2 };
+
+      let mut r = 0.0;
+      let mut g = 0.0;
+      let mut b = 0.0;
+
+      for i in 0..width {
+        for j in 0..height {
+          let w = (f64::consts::PI * x as f64 * i as f64 ) / width as f64;
+          let h = (f64::consts::PI * y as f64 * j as f64) / height as f64;
+
+          let basis = normalisation as f64 * w.cos() * h.cos();
+          let pixel = get_pixel(i, j);
+
+          r += basis * srgb_to_linear(pixel.0 as f64);
+          g += basis * srgb_to_linear(pixel.1 as f64);
+          b += basis * srgb_to_linear(pixel.2 as f64);
+        }
+      }
+
+      return (r * scale as f64, g * scale as f64, b * scale as f64);
 }
-
-fn clamp(width: u32, height: u32, max: u32) -> ClampedValues {
-  if width >= height && width > max {
-    return ClampedValues {
-      width: max,
-      height: ((height as f64 / width as f64) * max as f64).floor() as u32,
-    };
-  }
-
-  if height > width && height > max {
-    return ClampedValues {
-      width: ((width as f64 / height as f64) * max as f64).floor() as u32,
-      height: max,
-    };
-  }
-
-  return ClampedValues {
-    width,
-    height,
-  };
-} 
 
 
 fn blur(params: BlurParams) -> String {
   let clamped_width = params.width;
   let clamped_height = params.height;
 
-  let mut factors: Vec<(f64, f64, f64)> = Vec::new();
-  let scale = 1.0 / (clamped_width as f32 * clamped_height as f32);
+  let arc_factors  = Arc::new(Mutex::<Vec<(f64, f64, f64)>>::new(Vec::new()));
+
+  let mut handles: Vec<JoinHandle<()>> = vec![];
 
 
-  for y in 0..params.yComponent {
-    for x in 0..params.xComponent {
-      let normalisation = if x == 0 && y == 0 { 1 } else { 2 };
+  let raw = Arc::new(params.data);
 
-      let mut r = 0.0;
-      let mut g = 0.0;
-      let mut b = 0.0;
+  for y in 0..params.y_component {
+    let local_factors = Arc::clone(&arc_factors);
 
-      for i in 0..clamped_width {
-        for j in 0..clamped_height {
-          let w = (f64::consts::PI * x as f64 * i as f64 ) / clamped_width as f64;
-          let h = (f64::consts::PI * y as f64 * j as f64) / clamped_height as f64;
+    let other = Arc::clone(&raw);
 
-          let basis = normalisation as f64 * w.cos() * h.cos();
+    let handle = thread::spawn(move || {
+      for x in 0..params.x_component {
+        let factor = calc_factors(x, y, clamped_width, clamped_height, |i, j| {
+          let pixel = other.get_pixel(i, j);
 
-          let pixel = params.data.get_pixel(i, j);
+          return (
+            pixel[0],
+            pixel[1],
+            pixel[2],
+          );
+        });
 
-
-          let index_r = 0;
-          let index_g = 1;
-          let index_b = 2;
-
-          r += basis * srgb_to_linear(pixel[index_r] as f64);
-          g += basis * srgb_to_linear(pixel[index_g] as f64);
-          b += basis * srgb_to_linear(pixel[index_b] as f64);
-        }
+        let mut factors = local_factors.lock().unwrap();
+  
+        factors.push(factor);
       }
+    });
 
-      factors.push((r * scale as f64, g * scale as f64, b * scale as f64));
-    }
+    handles.push(handle);
   }
+
+  for handle in handles {
+    handle.join().unwrap();
+  }
+
+  let factors = arc_factors.lock().unwrap();
 
   let dc = factors[0];
   let ac = factors[1..].to_vec();
 
   let mut hash: String = Default::default();
 
-  let sizeflag = params.xComponent - 1 + (params.yComponent - 1) * 9;
+  let sizeflag = params.x_component - 1 + (params.y_component - 1) * 9;
 
   hash += &base83(sizeflag as f32, 1);
 
-  let mut max = 0.0;
+  let max: f64;
 
   if ac.len() > 0 {
-    let mut actualMax: f64 = 0.0;
+    let mut real_max: f64 = 0.0;
 
     for rgb in &ac {
       for value in vec![rgb.0, rgb.1, rgb.2] {
-        actualMax = actualMax.max(value);
+        real_max = real_max.max(value);
       }
     }
 
-    let d = actualMax * 166.0 - 0.5;
+    let d = real_max * 166.0 - 0.5;
 
     let quantised_max = cmp::max(0, cmp::min(82, d.floor() as i32));
 
@@ -161,8 +157,8 @@ fn main() {
     data: img.to_rgb8(),
     width,
     height,
-    xComponent: 4,
-    yComponent: 4,
+    x_component: 4,
+    y_component: 4,
   });
 
   let stdout = io::stdout();
@@ -280,25 +276,25 @@ fn linear_to_srgb(value: f64) -> i32 {
 }
 
 fn encode_dc(value: (f64, f64, f64)) -> i32 {
-  let roundedR = linear_to_srgb(value.0);
-  let roundedG = linear_to_srgb(value.1);
-  let roundedB = linear_to_srgb(value.2);
+  let rounded_r = linear_to_srgb(value.0);
+  let rounded_g = linear_to_srgb(value.1);
+  let rounded_b = linear_to_srgb(value.2);
 
-  return roundedR << 16 | roundedG << 8 | roundedB;
+  return rounded_r << 16 | rounded_g << 8 | rounded_b;
 }
 
 fn quantise (value: f64, max: f64) -> i32 {
-  let pow = (signPow(value / max, 0.5) * 9.0 + 9.5) as i32;
+  let pow = (sign_pow(value / max, 0.5) * 9.0 + 9.5) as i32;
 
   return 0.max(18.min(pow));
 }
 
 fn encode_ac(value: &(f64, f64, f64), max: f64) -> i32 {
-  let quantR = quantise(value.0, max);
-  let quantG = quantise(value.1, max);
-  let quantB = quantise(value.2, max);
+  let quant_r = quantise(value.0, max);
+  let quant_g = quantise(value.1, max);
+  let quant_b = quantise(value.2, max);
 
-  return quantR * 19 * 19 + quantG * 19 + quantB;
+  return quant_r * 19 * 19 + quant_g * 19 + quant_b;
 }
 
 fn sign (value: f64) -> i32 {
@@ -309,6 +305,6 @@ fn sign (value: f64) -> i32 {
   }
 }
 
-fn signPow (value: f64, power: f64) -> f64 {
+fn sign_pow (value: f64, power: f64) -> f64 {
   return sign(value) as f64 * value.abs().powf(power);
 }
