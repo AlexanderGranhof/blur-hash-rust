@@ -55,12 +55,17 @@ fn calc_factors(x: u32, y: u32, width: u32, height: u32, get_pixel: impl Fn(u32,
       return (r * scale as f64, g * scale as f64, b * scale as f64);
 }
 
+struct ComputedFactor {
+  y_component: u32,
+  data: (f64, f64, f64),
+}
+
 
 fn blur(params: BlurParams) -> String {
   let clamped_width = params.width;
   let clamped_height = params.height;
 
-  let arc_factors  = Arc::new(Mutex::<Vec<(f64, f64, f64)>>::new(Vec::new()));
+  let arc_factors  = Arc::new(Mutex::<Vec<ComputedFactor>>::new(Vec::new()));
 
   let mut handles: Vec<JoinHandle<()>> = vec![];
 
@@ -81,12 +86,15 @@ fn blur(params: BlurParams) -> String {
             pixel[0],
             pixel[1],
             pixel[2],
-          );
+          )
         });
 
         let mut factors = local_factors.lock().unwrap();
   
-        factors.push(factor);
+        factors.push(ComputedFactor {
+          y_component: y,
+          data: factor,
+        });
       }
     });
 
@@ -97,10 +105,14 @@ fn blur(params: BlurParams) -> String {
     handle.join().unwrap();
   }
 
-  let factors = arc_factors.lock().unwrap();
+  let mut factors = arc_factors.lock().unwrap();
 
-  let dc = factors[0];
-  let ac = factors[1..].to_vec();
+  factors.sort_by_key(|factor| factor.y_component);
+
+  let mapped_data = factors.iter().map(|factor| factor.data).collect::<Vec<(f64, f64, f64)>>();
+
+  let dc = mapped_data[0];
+  let ac = mapped_data[1..].to_vec();
 
   let mut hash: String = Default::default();
 
