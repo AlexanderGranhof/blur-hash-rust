@@ -8,10 +8,12 @@ To run the program you must compile it for now by running `cargo build --release
 
 ### Performance
 
+Running the program on a 4k image
+
 |      Type       | Time (seconds) |
 | :-------------: | :------------: |
-| Single Threaded |                |
-|  Multithreaded  |     2.726s     |
+| Single Threaded |     10.515     |
+|  Multithreaded  |     2.726      |
 
 ### Help
 
