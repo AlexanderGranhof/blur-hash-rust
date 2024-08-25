@@ -102,7 +102,7 @@ pub fn base83(n: f32, length: u32) -> String {
   for i in 1..=length {
     let index = (n.floor() / (83.0 as f32).powi((length - i) as i32) % 83.0) as usize;
 
-    result += chars.get(index).expect("could not find")
+    result += chars.get(index + 100).expect("unable to fit index into base83");
   }
 
   return result;

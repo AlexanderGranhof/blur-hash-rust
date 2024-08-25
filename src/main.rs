@@ -1,20 +1,34 @@
 use core::f64;
 use std::cmp;
-use std::env;
 use std::thread::JoinHandle;
 use image::ImageBuffer;
 use image::ImageReader;
 use image::Rgb;
 use std::thread;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+  /// x component of the hash (1-9)
+  #[arg(short, default_value = "4")]
+  x: u32,
+
+  /// y component of the hash (1-9)
+  #[arg(short, default_value = "4")]
+  y: u32,
+
+  /// Path to the image file
+  filepath: String
+}
 
 mod utils;
 
 fn main() {
-  let args: Vec<String> = env::args().collect();
-  let file_path = &args[1];
+  let args = Args::parse();
 
-  let image_file = match ImageReader::open(file_path) {
+  let image_file = match ImageReader::open(args.filepath) {
     Ok(img) => img,
     Err(error) => {
       eprint!("Could not open image file: {error:?}");
@@ -37,8 +51,8 @@ fn main() {
     data: img.to_rgb8(),
     width,
     height,
-    x_component: 4,
-    y_component: 4,
+    x_component: args.x,
+    y_component: args.y,
   }) {
     Ok(hash) => hash,
     Err(error) => match error {
@@ -54,7 +68,7 @@ fn main() {
     }
   };
 
-  print!("{:?}", hash);
+  print!("{}", hash);
 }
 
 struct BlurParams {
@@ -139,14 +153,12 @@ enum EncodingError {
 }
 
 fn calc_blur_hash(BlurParams { x_component ,y_component, width, height, data }: BlurParams) -> Result<String, EncodingError> {
-
   if x_component < 1 || x_component > 9 || y_component < 1 || y_component > 9 {
     return Err(EncodingError::InvalidComponentLength);
   }
 
   let mut handles: Vec<JoinHandle<Vec<ComputedFactor>>> = vec![];
 
-  let arc_factors  = Arc::new(Mutex::<Vec<ComputedFactor>>::new(Vec::new()));
   let rgb_data = Arc::new(data);
 
   for y in 0..y_component {
@@ -172,20 +184,18 @@ fn calc_blur_hash(BlurParams { x_component ,y_component, width, height, data }: 
     handles.push(handle);
   }
 
-  let mut factors = vec![];
+  let mut factors: Vec<ComputedFactor> = vec![];
 
   for handle in handles {
-    let factor =  match handle.join() {
+    let mut factor =  match handle.join() {
       Ok(factor) => factor,
       Err(_) => {
         return Err(EncodingError::UnknownThreadFailure);
       }
     };
 
-    factors.push(factor);
+    factors.append(&mut factor);
   }
-
-  let mut factors = arc_factors.lock().unwrap();
 
   factors.sort_by_key(|factor| factor.y_component);
 
