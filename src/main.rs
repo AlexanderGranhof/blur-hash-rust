@@ -22,7 +22,7 @@ struct Args {
   #[arg(short, default_value = "4")]
   y: u32,
 
-  /// step size for the sampling
+  /// step size for the sampling (1 = 100% of pixels, 2 = 50% of pixels, 10 = 10% of pixels etc...)
   #[arg(short, default_value = "1")]
   step: usize,
 
