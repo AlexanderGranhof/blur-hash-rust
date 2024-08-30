@@ -26,6 +26,7 @@ Arguments:
 Options:
   -x <X>         x component of the hash (1-9) [default: 4]
   -y <Y>         y component of the hash (1-9) [default: 4]
+  -s <STEP>      step size for the sampling [default: 1]
   -h, --help     Print help
   -V, --version  Print version
 ```

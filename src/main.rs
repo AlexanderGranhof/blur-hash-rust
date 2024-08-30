@@ -1,12 +1,15 @@
 use core::f64;
 use std::cmp;
 use std::thread::JoinHandle;
+use std::usize;
 use image::ImageBuffer;
 use image::ImageReader;
 use image::Rgb;
 use std::thread;
 use std::sync::Arc;
 use clap::Parser;
+
+mod utils;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -19,11 +22,14 @@ struct Args {
   #[arg(short, default_value = "4")]
   y: u32,
 
+  /// step size for the sampling
+  #[arg(short, default_value = "1")]
+  step: usize,
+
   /// Path to the image file
   filepath: String
 }
 
-mod utils;
 
 fn main() {
   let args = Args::parse();
@@ -53,6 +59,7 @@ fn main() {
     height,
     x_component: args.x,
     y_component: args.y,
+    sample_rate: args.step,
   }) {
     Ok(hash) => hash,
     Err(error) => match error {
@@ -71,12 +78,18 @@ fn main() {
   print!("{}", hash);
 }
 
+enum EncodingError {
+  InvalidComponentLength,
+  UnknownThreadFailure,
+}
+
 struct BlurParams {
   data: ImageBuffer<Rgb<u8>, Vec<u8>>,
   width: u32,
   height: u32,
   x_component: u32,
   y_component: u32,
+  sample_rate: usize,
 }
 
 struct ComputedFactor {
@@ -84,16 +97,75 @@ struct ComputedFactor {
   data: Rgb<f64>,
 }
 
-fn calc_factors(x: u32, y: u32, width: u32, height: u32, get_pixel: impl Fn(u32, u32) -> Rgb<u8>) -> Rgb<f64> {
-  let scale = 1.0 / (width as f32 * height as f32);
+fn calc_blur_hash(BlurParams { x_component ,y_component, width, height, sample_rate, data }: BlurParams) -> Result<String, EncodingError> {
+  if x_component < 1 || x_component > 9 || y_component < 1 || y_component > 9 {
+    return Err(EncodingError::InvalidComponentLength);
+  }
+
+  let mut handles: Vec<JoinHandle<Vec<ComputedFactor>>> = vec![];
+
+  let rgb_data = Arc::new(data);
+
+  for y in 0..y_component {
+    let cloned_rgb_data = Arc::clone(&rgb_data);
+
+    let handle = thread::spawn(move || {
+      let mut factors = vec![];
+
+      for x in 0..x_component {
+        let factor = calc_factors(x, y, width, height, sample_rate, |i, j| {
+          return *cloned_rgb_data.get_pixel(i, j);
+        });
+
+        factors.push(ComputedFactor {
+          y_component: y,
+          data: factor,
+        })
+      }
+
+      return factors;
+    });
+
+    handles.push(handle);
+  }
+
+  let mut factors: Vec<ComputedFactor> = vec![];
+
+  for handle in handles {
+    let mut factor =  match handle.join() {
+      Ok(factor) => factor,
+      Err(_) => {
+        return Err(EncodingError::UnknownThreadFailure);
+      }
+    };
+
+    factors.append(&mut factor);
+  }
+
+  factors.sort_by_key(|factor| factor.y_component);
+
+  let factor_data = factors.iter().map(|factor| factor.data).collect::<Vec<Rgb<f64>>>();
+
+  let dc = factor_data[0];
+  let ac = factor_data[1..].to_vec();
+  let sizeflag = x_component - 1 + (y_component - 1) * 9;
+
+  Ok(reduce_hash(dc, ac, sizeflag))
+}
+
+fn calc_factors(x: u32, y: u32, width: u32, height: u32, sample_rate: usize, get_pixel: impl Fn(u32, u32) -> Rgb<u8>) -> Rgb<f64> {
+  let a = (width as f32 / sample_rate as f32) * (height as f32 / sample_rate as f32);
+
+  let scale = 1.0 / a;
   let normalisation = if x == 0 && y == 0 { 1 } else { 2 };
 
   let mut r = 0.0;
   let mut g = 0.0;
   let mut b = 0.0;
 
-  for i in 0..width {
-    for j in 0..height {
+
+  for i in (0..width).step_by(sample_rate) {
+    for j in (0..height).step_by(sample_rate) {
       let w = (f64::consts::PI * x as f64 * i as f64 ) / width as f64;
       let h = (f64::consts::PI * y as f64 * j as f64) / height as f64;
 
@@ -147,63 +219,3 @@ fn reduce_hash(dc: Rgb<f64>, ac: Vec<Rgb<f64>>, flag: u32) -> String {
   return hash;
 }
 
-enum EncodingError {
-  InvalidComponentLength,
-  UnknownThreadFailure,
-}
-
-fn calc_blur_hash(BlurParams { x_component ,y_component, width, height, data }: BlurParams) -> Result<String, EncodingError> {
-  if x_component < 1 || x_component > 9 || y_component < 1 || y_component > 9 {
-    return Err(EncodingError::InvalidComponentLength);
-  }
-
-  let mut handles: Vec<JoinHandle<Vec<ComputedFactor>>> = vec![];
-
-  let rgb_data = Arc::new(data);
-
-  for y in 0..y_component {
-    let cloned_rgb_data = Arc::clone(&rgb_data);
-
-    let handle = thread::spawn(move || {
-      let mut factors = vec![];
-
-      for x in 0..x_component {
-        let factor = calc_factors(x, y, width, height, |i, j| {
-          return *cloned_rgb_data.get_pixel(i, j);
-        });
-
-        factors.push(ComputedFactor {
-          y_component: y,
-          data: factor,
-        })
-      }
-
-      return factors;
-    });
-
-    handles.push(handle);
-  }
-
-  let mut factors: Vec<ComputedFactor> = vec![];
-
-  for handle in handles {
-    let mut factor =  match handle.join() {
-      Ok(factor) => factor,
-      Err(_) => {
-        return Err(EncodingError::UnknownThreadFailure);
-      }
-    };
-
-    factors.append(&mut factor);
-  }
-
-  factors.sort_by_key(|factor| factor.y_component);
-
-  let factor_data = factors.iter().map(|factor| factor.data).collect::<Vec<Rgb<f64>>>();
-
-  let dc = factor_data[0];
-  let ac = factor_data[1..].to_vec();
-  let sizeflag = x_component - 1 + (y_component - 1) * 9;
-
-  Ok(reduce_hash(dc, ac, sizeflag))
-}
