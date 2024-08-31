@@ -10,103 +10,6 @@ pub fn srgb_to_linear(value: f64) -> f64 {
   }
 }
 
-pub fn base83(n: f32, length: u32) -> String {
-  let chars: &[&str] = &[
-    "0",
-    "1",
-    "2",
-    "3",
-    "4",
-    "5",
-    "6",
-    "7",
-    "8",
-    "9",
-    "A",
-    "B",
-    "C",
-    "D",
-    "E",
-    "F",
-    "G",
-    "H",
-    "I",
-    "J",
-    "K",
-    "L",
-    "M",
-    "N",
-    "O",
-    "P",
-    "Q",
-    "R",
-    "S",
-    "T",
-    "U",
-    "V",
-    "W",
-    "X",
-    "Y",
-    "Z",
-    "a",
-    "b",
-    "c",
-    "d",
-    "e",
-    "f",
-    "g",
-    "h",
-    "i",
-    "j",
-    "k",
-    "l",
-    "m",
-    "n",
-    "o",
-    "p",
-    "q",
-    "r",
-    "s",
-    "t",
-    "u",
-    "v",
-    "w",
-    "x",
-    "y",
-    "z",
-    "#",
-    "$",
-    "%",
-    "*",
-    "+",
-    ",",
-    "-",
-    ".",
-    ":",
-    ";",
-    "=",
-    "?",
-    "@",
-    "[",
-    "]",
-    "^",
-    "_",
-    "{",
-    "|",
-    "}",
-    "~",
-  ];
-
-  let mut result: String = Default::default();
-
-  for i in 1..=length {
-    let index = (n.floor() / (83.0 as f32).powi((length - i) as i32) % 83.0) as usize;
-
-    result += chars.get(index).expect("unable to fit index into base83");
-  }
-
-  return result;
-}
 
 
 pub fn linear_to_srgb(value: f64) -> i32 {
@@ -127,12 +30,32 @@ pub fn encode_dc(value: Rgb<f64>) -> i32 {
   return rounded_r << 16 | rounded_g << 8 | rounded_b;
 }
 
+pub fn decode_dc(value: u32) -> Rgb<f64> {
+  let r = srgb_to_linear((value >> 16) as f64);
+  let g = srgb_to_linear(((value >> 8) & 255) as f64);
+  let b = srgb_to_linear((value & 255) as f64);
+
+  return Rgb([r, g, b]);
+}
+
 pub fn encode_ac(value: &Rgb<f64>, max: f64) -> i32 {
   let quant_r = quantise(value[0], max);
   let quant_g = quantise(value[1], max);
   let quant_b = quantise(value[2], max);
 
   return quant_r * 19 * 19 + quant_g * 19 + quant_b;
+}
+
+pub fn decode_ac(value: u32, max: f64) -> Rgb<f64> {
+  let r = (value as f64 / (19.0 * 19.0)).floor() as u32;
+  let g = ((value as f64 / 19.0).floor() as u32) % 19;
+  let b = value % 19;
+
+  return Rgb([
+    sign_pow((r as f64 - 9.0) / 9.0, 2.0) * max,
+    sign_pow((g as f64 - 9.0) / 9.0, 2.0) * max,
+    sign_pow((b as f64 - 9.0) / 9.0, 2.0) * max,
+  ]);
 }
 
 fn quantise (value: f64, max: f64) -> i32 {

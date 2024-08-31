@@ -1,15 +1,20 @@
 use core::f64;
 use std::cmp;
+use std::io;
+use std::io::Read;
 use std::thread::JoinHandle;
 use std::usize;
+use base83::encode_base83;
 use image::ImageBuffer;
 use image::ImageReader;
 use image::Rgb;
+use image::Rgba;
 use std::thread;
 use std::sync::Arc;
 use clap::Parser;
 
 mod utils;
+mod base83;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -30,9 +35,120 @@ struct Args {
   filepath: String
 }
 
+fn validate(hash: &String) -> bool {
+  if hash.len() != 6 {
+    return false;
+  }
+
+  let char = match hash.chars().nth(0) {
+    None => return false,
+    Some(c) => c
+  };
+
+  let size_flag = base83::decode_base83(&String::from(char));
+  let x = (size_flag % 9) + 1;
+  let y = (size_flag as f32 / 9.0).floor() as u32 + 1;
+
+  let valid_length = 4 + 2 * x * y;
+
+  return hash.len() as u32 == valid_length;
+}
+
+fn decode(hash: String, width: u32, height: u32) -> Vec<Rgba<u8>> {
+  let punch_value = 1;
+
+  let size_flag = base83::decode_base83(&String::from(hash.chars().nth(0).unwrap()));
+  let x_component = (size_flag % 9) + 1;
+  let y_component = (size_flag as f32 / 9.0).floor() as u32 + 1;
+
+  let quantised_max = base83::decode_base83(&hash.chars().nth(1).unwrap().to_string());
+  let max = (quantised_max as f64 + 1.0) / 166.0;
+
+
+  let size = x_component * y_component;
+  let mut rgb_colors = vec![];
+
+  for i in 0..size {
+    if i == 0 {
+      let value = base83::decode_base83(&String::from(&hash[2..6]));
+      rgb_colors.push(utils::decode_dc(value));
+    } else {
+      let start = 4 + i as usize * 2;
+      let end = 6 + i as usize * 2;
+
+      let value = base83::decode_base83(&String::from(&hash[start..end]));
+      rgb_colors.push(utils::decode_ac(value, max * (punch_value as f64)));
+    }
+  }
+
+  let bytes_per_row = width * 4;
+  let data_size = bytes_per_row * height;
+
+  let mut rgb_data = vec![];
+
+  for y in 0..height {
+    for x in 0..width {
+      let mut r = 0.0;
+      let mut g = 0.0;
+      let mut b = 0.0;
+
+      for j in 0..y_component {
+        let basis_y = f64::cos((f64::consts::PI * y as f64 * j as f64) / height as f64);
+
+        for i in 0..x_component {
+          let basis = f64::cos((f64::consts::PI * x as f64 * i as f64) / height as f64) * basis_y;
+          let index = (i + j * x_component) as usize;
+          let color = rgb_colors.get(index).unwrap();
+
+          r += (color[0] * basis);
+          g += (color[1] * basis);
+          b += (color[2] * basis);
+        }
+      }
+      
+      let int_r = utils::linear_to_srgb(r as f64);
+      let int_g = utils::linear_to_srgb(g as f64);
+      let int_b = utils::linear_to_srgb(b as f64);
+
+      rgb_data.push(Rgba([int_r as u8, int_g as u8, int_b as u8, 255]));
+    }
+  }
+
+  return rgb_data;
+}
+
 
 fn main() {
   let args = Args::parse();
+
+  let stdin = io::stdin();
+  let mut stdin = stdin.lock(); // locking is optional
+
+  let mut full_line = String::new();
+
+  // Could also `match` on the `Result` if you wanted to handle `Err` 
+  while let Ok(n_bytes) = stdin.read_to_string(&mut full_line) {
+      if n_bytes == 0 { break }
+  }
+
+  println!("{}", full_line);
+
+  let x_size = 512;
+  let y_size: u32 = 512;
+
+  let data = decode(full_line, x_size, y_size);
+
+  let mut buffer = image::ImageBuffer::new(x_size,y_size);
+
+  for x in 0..x_size {
+    for y in 0..y_size {
+      buffer.put_pixel(x, y, data[(y * y_size + x) as usize]);
+    }
+  }
+
+  buffer.save("out.png").unwrap();
+
+  std::process::exit(0);
 
   let image_file = match ImageReader::open(args.filepath) {
     Ok(img) => img,
@@ -189,7 +305,7 @@ fn reduce_hash(dc: Rgb<f64>, ac: Vec<Rgb<f64>>, flag: u32) -> String {
   let mut hash: String = Default::default();
   let max: f64;
 
-  hash += &utils::base83(flag as f32, 1);
+  hash += &base83::encode_base83(flag as f32, 1);
 
   if ac.len() > 0 {
     let mut real_max: f64 = 0.0;
@@ -204,16 +320,16 @@ fn reduce_hash(dc: Rgb<f64>, ac: Vec<Rgb<f64>>, flag: u32) -> String {
     let quantised_max = cmp::max(0, cmp::min(82, adjusted_max.floor() as i32));
 
     max = (quantised_max as f64 + 1.0) / 166.0;
-    hash += &utils::base83(quantised_max as f32, 1);
+    hash += &base83::encode_base83(quantised_max as f32, 1);
   } else {
     max = 1.0;
-    hash += &utils::base83(0.0, 1);
+    hash += &base83::encode_base83(0.0, 1);
   }
 
-  hash += &utils::base83(utils::encode_dc(dc) as f32, 4);
+  hash += &base83::encode_base83(utils::encode_dc(dc) as f32, 4);
 
   for rgb in &ac {
-    hash += &utils::base83(utils::encode_ac(&rgb, max) as f32, 2);
+    hash += &base83::encode_base83(utils::encode_ac(&rgb, max) as f32, 2);
   }
 
   return hash;
